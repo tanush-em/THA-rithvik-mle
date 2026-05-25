@@ -1,0 +1,39 @@
+{
+  "_comment": "Per-file BM25 score multipliers. Default 1.0. Values < 1.0 down-weight suspicious, outdated, or misplaced documents. Set to 0.0 to fully exclude from retrieval.",
+  "overrides": {
+    "data/devplatform/test-expiration-auto-archival-policy.md": {
+      "weight": 0.1,
+      "reason": "Contradicts canonical behavior: claims tests expire after 30 days, but sample_support_tickets.csv confirms tests are active indefinitely unless start/end times are set. This doc appears intentionally misleading."
+    },
+    "data/devplatform/api-reference-deprecated-endpoints.md": {
+      "weight": 0.2,
+      "reason": "Explicitly describes deprecated API v2 endpoints (deprecated Jan 1 2025). Should not be cited for current customer guidance."
+    },
+    "data/visa/hackerrank-subscription-management.md": {
+      "weight": 0.7,
+      "reason": "Misplaced in data/visa/ — content is about DevPlatform subscription management, not Visa. Down-weighted for Visa queries; still useful for DevPlatform queries if retrieved."
+    },
+    "data/visa/comprehensive-history-digital-payment-networks.md": {
+      "weight": 0.3,
+      "reason": "Long historical/background document with no actionable support content. May inflate BM25 scores for common Visa terms while providing little support value."
+    },
+    "data/devplatform/understanding-large-language-models-primer.md": {
+      "weight": 0.1,
+      "reason": "Generic LLM technical primer with no DevPlatform-specific support content. Should never be cited as a support source."
+    },
+    "data/devplatform/educational-nonprofit-pricing.md": {
+      "weight": 0.8,
+      "reason": "Legitimate but sparse; retained at reduced weight since pricing info may be stale."
+    },
+    "data/claude/privacy-and-legal/claude-data-retention-internal-faq.md": {
+      "weight": 0.6,
+      "reason": "Labeled 'Internal FAQ' — may contain internal-only information not appropriate to surface verbatim to customers. Useful for understanding policy but cite with care."
+    }
+  },
+  "domain_path_prefixes": {
+    "devplatform": ["data/devplatform/"],
+    "claude": ["data/claude/"],
+    "visa": ["data/visa/"],
+    "general": ["data/devplatform/", "data/claude/", "data/visa/"]
+  }
+}

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Cursor IDE
+.cursor/
+
+# Viberr
+.viberr/
+
+# Python cache
+*.pkl
+*.sqlite
+__pycache__/
+
+# Pytest cache
+.pytest_cache/
