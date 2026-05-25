@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from io_csv import read_tickets, write_output
 from agent import process_ticket
+from llm import set_max_concurrency
 
 
 async def run_all(
@@ -58,8 +59,8 @@ def main() -> None:
         help="Process only ticket at this 0-based index"
     )
     parser.add_argument(
-        "--concurrency", type=int, default=20,
-        help="Max concurrent LLM calls (default: 20)"
+        "--concurrency", type=int, default=10,
+        help="Max concurrent in-flight API calls (default: 10)"
     )
     parser.add_argument(
         "--output", type=str, default=None,
@@ -78,6 +79,8 @@ def main() -> None:
             sys.exit(1)
         tickets = [tickets[args.ticket_index]]
         print(f"  Processing single ticket at index {args.ticket_index}")
+
+    set_max_concurrency(args.concurrency)
 
     start = time.time()
     print(f"Processing {'(dry-run)' if args.dry_run else ''}...")

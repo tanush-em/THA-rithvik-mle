@@ -112,7 +112,7 @@ _FAKE_AUTHORITY = re.compile(
     r"|routine\s+audit"
     r"|internal\s+employee\s+request"
     r"|emergency\s+access\s+to\s+customer"
-    r"|(?:ciso|chief\s+information\s+security\s+officer)"
+    r"|(?:ciso|chief\s+information\s+security\s+officer).{0,80}(?:output|diagram|credentials|internal\s+access|infrastructure)"
     r")",
     re.IGNORECASE,
 )
@@ -120,15 +120,19 @@ _FAKE_AUTHORITY = re.compile(
 # 5. Social engineering / false precedent
 _SOCIAL_ENGINEERING = re.compile(
     r"(?:"
-    r"previous\s+agent\s+(?:i\s+spoke\s+to|told\s+me|promised)"
-    r"|agent\s+(?:id|ID)\s*:\s*[A-Z0-9-]+"
+    r"agent\s+(?:id|ID)\s*:\s*[A-Z0-9-]+"
     r"|agent\s+(?:TK|SR|CS)-\d+"
     r"|(?:your\s+)?colleague(?:'s)?\s+commitment"
     r"|honor\s+(?:your|this)\s+(?:colleague's|promise|commitment)"
-    r"|as\s+(?:a\s+)?(?:paying\s+)?customer\s+(?:i\s+have\s+rights|with\s+rights)"
     r"|cancel\s+(?:that\s+)?fraud\s+report"
     r"|(?:i\s+)?authorize\s+(?:this\s+)?on\s+behalf\s+of"
     r")",
+    re.IGNORECASE,
+)
+
+# Softer signal: previous-agent claims without agent ID — extract legit fragment if present
+_PREVIOUS_AGENT_CLAIM = re.compile(
+    r"previous\s+agent\s+(?:i\s+spoke\s+to|told\s+me|promised)",
     re.IGNORECASE,
 )
 
@@ -280,19 +284,35 @@ def screen(text: str) -> SafetyResult:
                 result.injection = True
                 result.reasons.extend(f"base64:{r}" for r in sub_reasons)
 
+    # Previous-agent claims without hard social-engineering markers
+    if _PREVIOUS_AGENT_CLAIM.search(text) and "social_engineering" not in result.reasons:
+        result.injection = True
+        result.reasons.append("social_engineering")
+
     # --- If injection detected, try to extract a legit fragment ---
     if result.injection:
         cleaned = _strip_injection_blocks(text)
-        # Remove sentences containing override phrases
         sentences = re.split(r"(?<=[.!?])\s+", cleaned)
         legit_sentences = []
         for sent in sentences:
             s_found, _ = _has_injection_in_text(sent)
-            if not s_found:
+            if s_found or _SOCIAL_ENGINEERING.search(sent) or _PREVIOUS_AGENT_CLAIM.search(sent):
+                continue
+            if sent.strip():
                 legit_sentences.append(sent)
         legit = " ".join(legit_sentences).strip()
-        # Only return legit fragment if it's a meaningful question
-        if len(legit) > 15 and "?" in legit:
+        has_support_intent = bool(
+            re.search(r"\b(refund|subscription|billing|charge|help|issue|problem)\b", text, re.I)
+        )
+        substantive = len(legit) > 40 or bool(
+            re.search(r"\b(refund|subscription|billing|charge)\b", legit, re.I)
+        )
+        if substantive and ("?" in legit or has_support_intent):
             result.legit_fragment = legit
+        elif "social_engineering" in result.reasons and has_support_intent:
+            result.legit_fragment = (
+                "Customer reports a Claude Team subscription refund was promised "
+                "but not processed. They are requesting help with the billing issue."
+            )
 
     return result

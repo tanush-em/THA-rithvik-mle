@@ -58,8 +58,8 @@ python code/main.py --dry-run
 # Process single ticket by 0-based index (for debugging)
 python code/main.py --ticket-index 5
 
-# Override concurrency (default 20)
-python code/main.py --concurrency 10
+# Override concurrency (default 10; global rate limit ~40 req/min with 429 retry)
+python code/main.py --concurrency 8
 
 # Override output path
 python code/main.py --output /tmp/test_output.csv

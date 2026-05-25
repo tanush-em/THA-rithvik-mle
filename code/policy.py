@@ -80,6 +80,16 @@ _ESCALATION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Site-wide / platform-wide failure reports
+_SITEWIDE_OUTAGE = re.compile(
+    r"\b("
+    r"site\s+is\s+down|none\s+of\s+the\s+(?:submissions|pages)"
+    r"|(?:all|every)\s+(?:submissions|requests|pages).{0,40}(?:not\s+working|failing|down)"
+    r"|none\s+of\s+the\s+submissions\s+across"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Tickets that can be replied but need verification first
 _NEEDS_VERIFICATION = re.compile(
     r"\b("
@@ -183,13 +193,21 @@ def assess(
         result.escalation_reason = "No corpus documentation found for this topic"
         return result
 
-    # 6. Pure outage bug with no domain → escalate
+    # 6. Site-wide / platform-wide outage → escalate
+    if request_type == "bug" and _SITEWIDE_OUTAGE.search(text):
+        result.status = "escalated"
+        if result.risk_level in ("low", "medium"):
+            result.risk_level = "high"
+        result.escalation_reason = "Platform-wide outage or widespread submission failure"
+        return result
+
+    # 7. Pure outage bug with no domain → escalate
     if request_type == "bug" and not domains:
         result.status = "escalated"
         result.escalation_reason = "Site-wide outage or bug report with no identifiable product"
         return result
 
-    # 7. Needs verification but conditions met for reply
+    # 8. Needs verification but conditions met for reply
     if _NEEDS_VERIFICATION.search(text):
         result.needs_verification = True
 

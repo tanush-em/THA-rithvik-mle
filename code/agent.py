@@ -140,28 +140,87 @@ def _validate_citations(cited_paths: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Safe default row
+# Safe default row + partial pipeline context
 # ---------------------------------------------------------------------------
 
-def _safe_default_row(input_row: dict[str, str], reason: str) -> dict[str, Any]:
+def _build_partial_context(input_row: dict[str, str]) -> dict[str, Any]:
+    """Re-run cheap deterministic stages so error rows preserve real metadata."""
+    row = {k.lower(): v for k, v in input_row.items()}
+    raw_issue = row.get("issue", "")
+    raw_subject = row.get("subject", "")
+    raw_company = row.get("company", "")
+
+    from io_csv import parse_issue
+    turns = parse_issue(raw_issue)
+    full_text = " ".join(
+        t.get("content", "") for t in turns if t.get("role") in ("user", "human")
+    )
+    combined_text = normalize(f"{raw_subject} {full_text}".strip())
+    full_text = normalize(full_text)
+
+    pii_result = detect_and_redact(combined_text)
+    language = detect_language(full_text) if full_text.strip() else "en"
+    clf = classify(redact(combined_text, pii_result), company=raw_company, subject=raw_subject)
+    policy = assess(
+        text=redact(combined_text, pii_result),
+        request_type=clf.request_type,
+        domains=clf.domains,
+        pii_detected=pii_result.detected,
+        injection_detected=False,
+        no_corpus_results=False,
+    )
+    product_area = _infer_product_area(redact(combined_text, pii_result), clf.domains)
+    actions = select_actions(
+        redact(combined_text, pii_result),
+        "escalated",
+        policy.risk_level,
+        clf.domains,
+        pii_detected=pii_result.detected,
+    )
     return {
-        "issue": input_row.get("Issue", input_row.get("issue", "")),
-        "subject": input_row.get("Subject", input_row.get("subject", "")),
-        "company": input_row.get("Company", input_row.get("company", "")),
+        "issue": raw_issue,
+        "subject": raw_subject,
+        "company": raw_company,
+        "product_area": product_area,
+        "request_type": clf.request_type,
+        "risk_level": policy.risk_level,
+        "pii_detected": str(pii_result.detected).lower(),
+        "language": language,
+        "actions_taken": json.dumps(actions),
+    }
+
+
+def _safe_default_row(
+    input_row: dict[str, str],
+    reason: str,
+    partial: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ctx = partial or _build_partial_context(input_row)
+    return {
+        "issue": ctx.get("issue", input_row.get("issue", "")),
+        "subject": ctx.get("subject", input_row.get("subject", "")),
+        "company": ctx.get("company", input_row.get("company", "")),
         "response": _CANNED_ERROR,
-        "product_area": "general_support",
+        "product_area": ctx.get("product_area", "general_support"),
         "status": "escalated",
-        "request_type": "invalid",
-        "justification": f"Pipeline error — escalated for safety. Reason: {reason}",
+        "request_type": ctx.get("request_type", "product_issue"),
+        "justification": (
+            f"Pipeline error — escalated for safety. Reason: {reason}. "
+            f"Preserved classification: request_type={ctx.get('request_type', 'product_issue')}, "
+            f"risk={ctx.get('risk_level', 'high')}."
+        ),
         "confidence_score": 0.5,
         "source_documents": "",
-        "risk_level": "high",
-        "pii_detected": "false",
-        "language": "en",
-        "actions_taken": json.dumps([{
-            "action": "escalate_to_human",
-            "parameters": {"priority": "normal", "department": "general", "summary": reason},
-        }]),
+        "risk_level": ctx.get("risk_level", "high"),
+        "pii_detected": ctx.get("pii_detected", "false"),
+        "language": ctx.get("language", "en"),
+        "actions_taken": ctx.get(
+            "actions_taken",
+            json.dumps([{
+                "action": "escalate_to_human",
+                "parameters": {"priority": "normal", "department": "general", "summary": reason},
+            }]),
+        ),
     }
 
 
@@ -179,10 +238,11 @@ async def process_ticket(input_row: dict[str, str], dry_run: bool = False) -> di
     Returns:
         Output dict with all required columns.
     """
+    partial = _build_partial_context(input_row)
     try:
         return await _process(input_row, dry_run)
     except Exception as exc:
-        return _safe_default_row(input_row, str(exc)[:200])
+        return _safe_default_row(input_row, str(exc)[:200], partial)
 
 
 async def _process(input_row: dict[str, str], dry_run: bool) -> dict[str, Any]:
@@ -439,7 +499,9 @@ async def _process(input_row: dict[str, str], dry_run: bool) -> dict[str, Any]:
     if policy.status == "escalated":
         justification_parts.append(f"Escalated: {policy.escalation_reason}.")
     if pii_result.detected:
-        justification_parts.append(f"PII detected ({', '.join(set(pii_result.types))}); redacted from response.")
+        justification_parts.append(
+            f"PII detected ({', '.join(sorted(set(pii_result.types)))}); redacted from response."
+        )
     if not justification_parts:
         justification_parts.append(f"Answered from corpus. Sources: {len(llm_sources)} document(s).")
     if not dry_run and judge_verdict != "keep":

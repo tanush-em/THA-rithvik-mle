@@ -7,7 +7,8 @@ Two entry points:
 Both use:
   - temperature=0 for determinism
   - SQLite cache keyed by SHA256(model + prompt_version + inputs)
-  - asyncio.Semaphore(20) for concurrency control
+  - Global rate limiter (~40 req/min) + retry with backoff on 429
+  - asyncio.Semaphore(10) for in-flight request cap
 """
 from __future__ import annotations
 
@@ -15,10 +16,11 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import anthropic
 
@@ -28,9 +30,44 @@ CACHE_PATH = os.path.join(os.path.dirname(__file__), "cache", "anthropic.sqlite"
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 MAX_TOKENS = 1024
+MAX_RETRIES = 6
+BASE_BACKOFF_SEC = 2.0
+RATE_LIMIT_CALLS = int(os.environ.get("ANTHROPIC_RATE_LIMIT_PER_MIN", "40"))
+RATE_LIMIT_PERIOD = 60.0
 
-# Global semaphore for concurrency control
-_semaphore = asyncio.Semaphore(20)
+# Global semaphore for in-flight API calls
+_semaphore = asyncio.Semaphore(10)
+
+
+class _RateLimiter:
+    """Token-bucket style limiter: max N API calls per period."""
+
+    def __init__(self, max_calls: int, period: float) -> None:
+        self._max_calls = max_calls
+        self._period = period
+        self._timestamps: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            self._timestamps = [t for t in self._timestamps if now - t < self._period]
+            if len(self._timestamps) >= self._max_calls:
+                wait = self._period - (now - self._timestamps[0]) + 0.1
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                now = time.monotonic()
+                self._timestamps = [t for t in self._timestamps if now - t < self._period]
+            self._timestamps.append(time.monotonic())
+
+
+_rate_limiter = _RateLimiter(RATE_LIMIT_CALLS, RATE_LIMIT_PERIOD)
+
+
+def set_max_concurrency(n: int) -> None:
+    """Adjust in-flight cap (called from main.py --concurrency)."""
+    global _semaphore
+    _semaphore = asyncio.Semaphore(max(1, n))
 
 # Thread-local Anthropic client (avoid sharing across event loops)
 _client_lock = threading.Lock()
@@ -108,6 +145,43 @@ def _cache_set(key: str, value: dict) -> None:
 def _make_cache_key(*parts: str) -> str:
     combined = "|".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()
+
+
+def _parse_confidence(value: object) -> float:
+    """Parse self_confidence; tolerate malformed tool output (e.g. XML tags)."""
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    text = str(value).strip()
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if match:
+        return max(0.0, min(1.0, float(match.group(1))))
+    return 0.5
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    if isinstance(exc, anthropic.RateLimitError):
+        return True
+    msg = str(exc).lower()
+    return "rate_limit" in msg or "429" in msg
+
+
+async def _messages_create(**kwargs: object) -> anthropic.types.Message:
+    """Call Anthropic API with rate limiting and exponential backoff on 429."""
+    client = _get_async_client()
+    last_err: BaseException | None = None
+    for attempt in range(MAX_RETRIES):
+        await _rate_limiter.acquire()
+        async with _semaphore:
+            try:
+                return await client.messages.create(**kwargs)  # type: ignore[arg-type]
+            except Exception as exc:
+                if not _is_rate_limit_error(exc):
+                    raise
+                last_err = exc
+        wait = BASE_BACKOFF_SEC * (2 ** attempt)
+        await asyncio.sleep(wait)
+    assert last_err is not None
+    raise last_err
 
 
 # ---------------------------------------------------------------------------
@@ -229,17 +303,15 @@ async def call_responder(
             from_cache=True,
         )
 
-    async with _semaphore:
-        client = _get_async_client()
-        msg = await client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            temperature=0,
-            system=system_prompt,
-            tools=_RESPONDER_TOOLS,
-            tool_choice={"type": "tool", "name": "respond_to_ticket"},
-            messages=[{"role": "user", "content": user_message}],
-        )
+    msg = await _messages_create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        temperature=0,
+        system=system_prompt,
+        tools=_RESPONDER_TOOLS,
+        tool_choice={"type": "tool", "name": "respond_to_ticket"},
+        messages=[{"role": "user", "content": user_message}],
+    )
 
     # Extract tool use result
     tool_input: dict = {}
@@ -251,7 +323,7 @@ async def call_responder(
     result = ResponderResult(
         response=tool_input.get("response", "I was unable to find relevant information."),
         sources_used=tool_input.get("sources_used", []),
-        self_confidence=float(tool_input.get("self_confidence", 0.5)),
+        self_confidence=_parse_confidence(tool_input.get("self_confidence", 0.5)),
     )
 
     _cache_set(cache_key, {
@@ -299,17 +371,15 @@ async def call_judge(
             from_cache=True,
         )
 
-    async with _semaphore:
-        client = _get_async_client()
-        msg = await client.messages.create(
-            model=MODEL,
-            max_tokens=512,
-            temperature=0,
-            system=system_prompt,
-            tools=_JUDGE_TOOLS,
-            tool_choice={"type": "tool", "name": "judge_response"},
-            messages=[{"role": "user", "content": user_message}],
-        )
+    msg = await _messages_create(
+        model=MODEL,
+        max_tokens=512,
+        temperature=0,
+        system=system_prompt,
+        tools=_JUDGE_TOOLS,
+        tool_choice={"type": "tool", "name": "judge_response"},
+        messages=[{"role": "user", "content": user_message}],
+    )
 
     tool_input: dict = {}
     for block in msg.content:
